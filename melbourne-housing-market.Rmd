@@ -1,0 +1,604 @@
+---
+title: "Melbourne Housing Market"
+author: "*Justin Gee*"
+output:
+  rmdformats::readthedown:
+    toc_depth: 3
+    self_contained: true
+  thumbnails: true
+  lightbox: true
+  gallery: false
+  highlight: tango
+  df_print: paged
+---
+# Abstract
+In this project, we will use Linear Regression, Decision Tree and Random Forests to predict the 
+price of a home in Melbourne, Australia.
+
+The metric used to determine *good-fit* of the model is RMSE, which 
+determines the standard deviation of the average distance of a data point from the predicted values.
+
+The dataset can be found on [Kaggle](<https://www.kaggle.com/anthonypino/melbourne-housing-market#MELBOURNE_HOUSE_PRICES_LESS.csv>). 
+
+# The Data
+Load libraries used for this project.
+```{r, echo=TRUE, eval=TRUE, message=FALSE, warning=FALSE}
+# Data manipulation and modeling
+library(dplyr)
+library(caret)
+library(ranger)
+library(rpart)
+
+# Visuals
+library(ggplot2)
+library(cowplot)
+library(sf)
+library(rnaturalearth)
+library(rnaturalearthdata)
+library(rgeos)
+library(corrplot)
+```
+
+Load dataset.
+```{r, echo=TRUE, eval=TRUE}
+housingPrices <- read.csv("Melbourne_housing_FULL.csv")
+head(housingPrices, 2)
+```
+
+This is the data that we will be using for modeling. A few things to note:
+
+* There are 34857 observations with 21 variables.
+* This data does contain missing values.
+
+Features that were removed:
+
+* Suburb, Address, Postcode, Lattitude, Longitude
+  + These feature was removed because of the increase in model complexity. Since there are other variables that take into account location, such as Region. Reducing the complexity of the model allows for more generalized interpretations.
+* Method, SellerG, Date
+  + These variables are not applicable to the goal of the project. 
+* Propertycount
+  + This variable counted the number of properties in the region. Can be accounted for by regions.
+  
+```{r, echo=FALSE, eval=TRUE}
+housingPrices <- housingPrices %>%
+  select(-c(Suburb, Address, Method, SellerG, Date, Postcode, Propertycount))
+```
+
+```{r, echo=FALSE}
+housingPrices$Distance <- as.integer(housingPrices$Distance)
+```
+
+```{r, echo=FALSE, eval=TRUE}
+housingPrices <- na.omit(housingPrices)
+```
+
+# Analysis of the Data
+```{r, echo=FALSE, eval=TRUE}
+numerical <- housingPrices %>%
+  select(Rooms, Price, Distance, Bedroom2, Bathroom, Car, Landsize, 
+         BuildingArea, YearBuilt)
+```
+
+## Basic Statistics
+```{r}
+summary(housingPrices)
+```
+
+This table gives us summary statistics of each variables in the data. A few things to note:
+
+* Many variables have extreme maximums, such as Rooms, Landsize, and Building Area.
+  + These values can be attributed to extremely large homes, which may affect the results of modelling.
+* CouncilArea
+  + There are 34 unique council areas in the data, with most falling below 100 homes. This discrepency can be accounted for by creating an "Other " category.
+
+## Graphing of Features
+
+### Graph 1
+```{r, echo=TRUE, eval=TRUE}
+corrplot(cor(numerical), method = "color", type = "upper")
+```
+
+From the correlation matrix pairs, pairs involving BuildingArea such as Rooms, 
+Bedrooms2, and Bathrooms have high degrees of correlation.
+In particular Bedroom2 and Rooms have the highest degree of correlation at 
+0.96446451. In this case, I have removed Bedroom2 from the model.
+
+```{r, echo=FALSE, eval=TRUE}
+world <- ne_countries(scale = "small", returnclass = "sf")
+
+regions <- ggplot() +
+  geom_sf(data = world) +
+  coord_sf(xlim = c(144.3, 145.7), ylim = c(-38.5, -37.3), expand = FALSE) +
+  geom_point(data = housingPrices,
+             aes(x = Longtitude, y = Lattitude,
+                 colour = Regionname))
+
+type_h <- housingPrices %>%
+  filter(Type == 'h')
+type_t <- housingPrices %>%
+  filter(Type == 't')
+type_u <- housingPrices %>%
+  filter(Type == 'u')
+```
+
+### Graph 2
+```{r, echo=TRUE, eval=TRUE}
+housingType_h <- ggplot() +
+  geom_sf(data = world) +
+  coord_sf(xlim = c(144.3, 145.7), ylim = c(-38.5, -37.3), expand = FALSE) +
+  geom_point(data = type_h, color = '#F8766D',
+             aes(x = Longtitude, y = Lattitude)) +
+  ggtitle("Houses Across Melbourne")
+
+housingType_t <- ggplot() +
+  geom_sf(data = world) +
+  coord_sf(xlim = c(144.3, 145.7), ylim = c(-38.5, -37.3), expand = FALSE) +
+  geom_point(data = type_t, color = '#619CFF',
+             aes(x = Longtitude, y = Lattitude)) +
+  ggtitle("Town Houses Across Melbounre")
+
+housingType_u <- ggplot() +
+  geom_sf(data = world) +
+  coord_sf(xlim = c(144.3, 145.7), ylim = c(-38.5, -37.3), expand = FALSE) +
+  geom_point(data = type_u, color = '#00BA38',
+             aes(x = Longtitude, y = Lattitude)) +
+  ggtitle("Units Across Melbourne")
+```
+
+```{r, echo=FALSE, eval=TRUE}
+plot_grid(housingType_h, housingType_u, ncol = 2)
+plot_grid(housingType_t, ncol = 1)
+```
+
+```{r, echo=FALSE, eval=TRUE}
+housingPrices <- housingPrices %>%
+  select(-c(Longtitude, Lattitude))
+```
+
+These graphs show the locations of homes across Melbourne. Similar to many city layouts, townhouses and units are centralized towards the center. Houses are located in various locations across the city, in the center, the city's edge as well as suburbs outside. We can expect to find homes towards the center to be more expensive.
+
+### Graph 3
+```{r, echo=TRUE, eval=TRUE}
+ggplot(housingPrices, aes(Type, Price)) +
+  geom_boxplot(outlier.colour = "black") + 
+  scale_x_discrete(labels = c('Houses','Townhouses','Units')) +
+  scale_y_continuous(breaks=seq(0,10000000,1250000)) +
+  xlab("Type of Home") +
+  ylab("Price") +
+  ggtitle("Price Distribution of Home Type")
+```
+
+From the graph, we can see that houses have the widest range of prices while units have the smallest. This can be explained by other factors such as building area.
+
+### Graph 4
+```{r, echo=TRUE, eval=TRUE, message=FALSE}
+housingPrices %>%
+  filter(YearBuilt != 1196) %>%
+  select(Price, Type, YearBuilt) %>%
+  group_by(YearBuilt, Type) %>%
+  summarise(Mean = mean(Price)) %>%
+  ggplot(aes(x=YearBuilt, y=Mean, color=Type)) +
+  geom_smooth(method = 'loess') +
+  geom_line() +
+  scale_color_discrete(name = "Type of Home", 
+                       labels=c("House", "Townhouse", "Unit")) +
+  xlab("Year") +
+  ylab("Price") +
+  ggtitle("Average Price of Homes")
+```
+
+Over the years there has been a decrease in average prices of houses, with 
+houses increasing in price around 2000. Average prices of townhouses and units have stayed relatively stable. 
+
+### Graph 5
+```{r, echo=TRUE, eval=TRUE}
+ggplot(housingPrices, aes(Regionname, Price)) +
+  geom_boxplot(outlier.colour = "black") +
+  scale_y_continuous(breaks=seq(0,10000000,1250000)) +
+  theme(legend.position = "none") +
+  xlab("Region") +
+  ylab("Price") +
+  ggtitle("Region Price Distributions") +
+  coord_flip()
+```
+
+Homes in the Southern Metropolitan region has the highest average price. This 
+makes sense since this region is the center-most region in Melbourne.
+
+### Graph 6
+```{r, echo=TRUE, eval=TRUE, message=FALSE}
+housingPrices %>%
+  filter(YearBuilt != 1196) %>%
+  ggplot(aes(x=YearBuilt, y=Price, color=Regionname)) +
+  scale_x_continuous(breaks=seq(1800,2020,25)) +
+  geom_smooth(method = 'loess') +
+  xlab("Year") +
+  ylab("Price") +
+  ggtitle("Region Prices") +
+  labs(color = "Region")
+```
+
+We can observe the years of region development, with some regions being new or 
+older than others. Homes in the southern regions have the steepest-rise in 
+price post-1975, while other regions have had a relative increase in prices.
+
+### Graph 7
+```{r, echo=TRUE, eval=TRUE}
+housingPrices %>%
+  group_by(CouncilArea) %>%
+  summarise(Count = n()) %>%
+  ggplot(aes(reorder(CouncilArea, Count), Count)) +
+  geom_bar(stat = 'identity') +
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.5)) +
+  coord_flip() +
+  xlab("Council Area") +
+  ylab("Count") +
+  ggtitle("Council Area Frequencies")
+```
+
+There are many council areas with Moorabool Shire having 1 home and Boroondara 
+City having over 800 homes. To reduce the number of levels for this variable I 
+will convert levels with fewer than 103 counts to "Other".
+
+```{r, echo=FALSE, eval=TRUE}
+remove(numerical)
+```
+
+# Preparing Data
+## Feature Engineering and Cleaning
+Create BuildingAge feature
+```{r, echo=TRUE, eval=TRUE}
+housingPrices$BuildingAge <- 2020 - housingPrices$YearBuilt
+housingPrices$BuildingAge <- as.integer(housingPrices$BuildingAge)
+```
+
+We make building age since the age of a build is easier to interpret than year built. 
+
+```{r, echo=FALSE, eval=TRUE}
+housingPrices <- housingPrices %>% 
+  filter(BuildingAge != 824, Price != 9000000, BuildingArea < 3000)
+```
+
+Reducing category levels
+```{r, echo=TRUE, eval=TRUE}
+temp <- housingPrices %>%
+  select(CouncilArea) %>%
+  group_by(CouncilArea) %>%
+  count(CouncilArea) %>%
+  arrange(desc(n)) %>%
+  filter(n <= 103)
+
+housingPrices$CouncilArea <- as.character(housingPrices$CouncilArea)
+
+housingPrices <- housingPrices %>%
+  mutate(CouncilArea = replace(CouncilArea, CouncilArea %in% temp[1]$CouncilArea, 
+                               "Other"))
+
+housingPrices$CouncilArea <- as.factor((housingPrices$CouncilArea))
+```
+
+```{r, echo=FALSE, eval=TRUE}
+remove(temp)
+```
+
+Creating dummy variables
+```{r, echo=TRUE, eval=TRUE}
+dummy_obj <- dummyVars(~ Type + Regionname, data = housingPrices, 
+                       sep = ".", levelsOnly = TRUE)
+dummies <- predict(dummy_obj, housingPrices)
+
+housingPrices <- cbind(housingPrices, dummies)
+housingPrices <- housingPrices %>%
+  select(-c(Type, Regionname, CouncilArea, Bedroom2, YearBuilt))
+```
+
+```{r, echo=FALSE, eval=TRUE}
+remove(dummies)
+remove(dummy_obj)
+data <- housingPrices[,-c(12)]
+```
+
+## Training and Test Sets
+
+Used logarithmic transformation of response variable to linearize relationship 
+between dependent variables.
+```{r, echo=TRUE, eval=TRUE}
+set.seed(444)
+
+data$Price <- log(data$Price)
+colnames(data) <- make.names(colnames(data))
+
+train_ind <- createDataPartition(y = data$Price, p = 0.8, list = FALSE)
+
+training <- data[train_ind,]
+testing <- data[-train_ind,]
+
+X_train <- training %>% select(-Price)
+X_test <- testing %>% select(-Price)
+Y_train <- training$Price
+Y_test <- testing$Price
+```
+
+# Modeling
+
+## The Math behind the Metrics
+
+Root Mean Square Error (RMSE) is defined as:
+
+* RMSE = $\sqrt{\frac{\sum_{i=1}^{N}{(\hat{p}-p)^2}}{N}}$
+* Where:
+  + $\hat{p} =$ predicted values
+  + $p =$ observed values
+  + $N =$ number of observed values
+
+RMSE is the standard deviation of the average squared residuals. As residuals become smaller, the more accuracy the model is at prediting the dependent variable. When using RMSE, we get the average distance of a data point from the predicted values.
+
+## Notes
+
+* Linear Regression:
+  + One of the most widely used models for predicting continuous variables. The model allows for easy interpretation of variable interactions.
+* Decision Tree:
+  + The simplest tree-based model with the ability to predict both continuous and discrete variables. By splitting leaves via gini criterion, we can narrow down to a predicted value.
+* Random Forest;
+  + A collection of decision trees with varying splits and sample sizes that creates a robust model. Taking the decision trees, we aggregate the results. One downside of this model, is its interpretation.
+
+## Linear Regression
+
+```{r, echo=TRUE, eval=FALSE, message=FALSE, warning=FALSE}
+lm_ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 10)
+fitted_lm <- train(Price~., data = training,
+                   trControl = lm_ctrl,
+                   metric = "RMSE",
+                   method = "lm")
+```
+
+```{r, echo=FALSE, eval=TRUE}
+#saveRDS(fitted_lm, "fitted_lm.rds")
+fitted_lm <- readRDS("fitted_lm.rds")
+```
+
+```{r, echo=FALSE, eval=FALSE}
+#fitted_lm$resample
+```
+
+```{r, echo=TRUE, eval=TRUE}
+fitted_lm$results
+```
+
+After training the model, we get a RMSE of 0.3, as well as other model metrics such as Rsquared at 0.684.
+
+```{r}
+fitted_lm$finalModel$coefficients
+```
+
+Looking at the coefficients of each variable, we can see that all variables increase the price of a home. Note, regions are categorical meaning the independent variable is interpreted as a 0 or 1. Living in the Southern Metropolitan increases the price the highest compared to other regions. As for continuous variables, each additional bathroom is valued higher than an individual room.
+
+```{r, echo=TRUE, eval=TRUE, warning=FALSE}
+predict_lm <- predict(fitted_lm, X_test)
+residuals <- Y_test - predict_lm
+RMSE(predict_lm, Y_test)
+```
+
+```{r, echo=FALSE, eval=TRUE}
+lm_result <- RMSE(predict_lm, Y_test)
+```
+
+Using the Linear Regression model we predict prices from the test set. We then compare the predicted values to the observed values to determine our accuracy. The result of the model is an RMSE of 0.306.
+
+```{r, echo=FALSE, eval=TRUE}
+lm_data <- as.data.frame(cbind(predicted = predict_lm,
+                               observed = Y_test,
+                               resid = residuals))
+```
+
+```{r, echo=TRUE, eval=TRUE}
+ggplot(lm_data, aes(x = predicted, y = observed)) +
+  geom_point() +
+  geom_smooth(method = "lm")
+```
+
+Plotting the observed and predicted values, we can see that the observed values are clustered around the regression line. This means that the model does well when predicting housing prices. We can also see that there are outliers where the model was not able to take into account.
+
+```{r, echo=TRUE, eval=TRUE}
+ggplot(lm_data, aes(x = predicted, y = resid)) +
+  geom_point() +
+  geom_hline(yintercept = 0)
+```
+
+When looking at residuals, we can determine model fit by how closely the residuals are to zero. In this case, the residuals are normally distributed with most clustering around zero.
+
+## Decision Tree
+```{r, echo=TRUE, eval=FALSE, message=FALSE}
+dt_ctrl <- trainControl(method = "repeatedcv", number = 10, repeats = 10)
+fitted_dt <- train(Price~., data = training,
+                   trControl = dt_ctrl,
+                   tuneLength = 10,
+                   method = "rpart",
+                   metric = "RMSE")
+```
+
+```{r, echo=FALSE, eval=TRUE}
+#saveRDS(fitted_dt, "fitted_dt.rds")
+fitted_dt <- readRDS("fitted_dt.rds")
+```
+
+```{r, echo=TRUE, eval=TRUE}
+fitted_dt
+```
+
+After training using cross-validation, a decision tree of cp = 0.0137 was the best model with an RMSE of 0.334.
+
+```{r, echo=TRUE, eval=TRUE}
+plot(varImp(fitted_dt))
+```
+
+We can plot the variables that the decision tree found important when modeling the data. Regions other than Southern and Eastern Metropolitan are not as important to the decision tree model. Building Area and Age seemed to be highly important when determining housing prices.
+
+```{r, echo=TRUE, eval=TRUE, fig.width=10, fig.height=8}
+plot(fitted_dt$finalModel)
+text(fitted_dt$finalModel)
+```
+
+Displays the splits the decision tree made. Remember that the resulting values are logarithmic.
+
+```{r, echo=TRUE, eval=TRUE}
+predict_dt <- predict(fitted_dt, X_test)
+RMSE(predict_dt, Y_test)
+```
+
+```{r, echo=FALSE, eval=TRUE}
+dt_result <- RMSE(predict_dt, Y_test)
+```
+
+Both training and testing RMSE values are relatively close resulting in a 
+good fitted model.
+
+## Random Forest
+```{r, echo=TRUE, eval=FALSE}
+rf_ctrl <- trainControl(method = "cv", number = 5)
+fitted_rf <- train(Price~., data = training,
+                   trControl = rf_ctrl,
+                   tuneLength = 10,
+                   method = "ranger",
+                   importance = "permutation",
+                   metric = "RMSE",
+                   verbose = TRUE)
+```
+
+```{r, echo=FALSE, eval=TRUE}
+#saveRDS(fitted_rf, "fitted_rf.rds")
+fitted_rf <- readRDS("fitted_rf.rds")
+```
+
+```{r, echo=TRUE, eval=TRUE}
+fitted_rf
+```
+
+The model found mtry = 16, splitrule = extratrees and min.node.size = 5 to be the best model. Obtaining a RMSE of 0.21.
+
+```{r, echo=TRUE, eval=TRUE}
+print(fitted_rf$finalModel)
+```
+
+This output tells the model parameters found to be the most optimal for the model.
+
+```{r, echo=TRUE, eval=TRUE}
+plot(varImp(fitted_rf))
+```
+
+Similar to the decision tree, regions other than Southern and Eastern Metropolitan is not as important to the model. The model places Southern Metropolitan, Distance, and Age to be the top 3 variables of importance.
+
+```{r, echo=TRUE, eval=TRUE}
+plot(fitted_rf)
+```
+
+At 12 selected predictors the model metric, RMSE, begins to increase with 
+additional predictors using the variance splitting rule. Though the extratrees 
+splitting rule does not decrease after 12 predictors, the gain from each 
+additional predictor falls off. This suggests that 12 predictors is sufficient 
+for the model.
+
+```{r, echo=TRUE, eval=TRUE}
+predict_rf <- predict(fitted_rf, X_test)
+RMSE(predict_rf, Y_test)
+```
+
+```{r, echo=FALSE, eval=TRUE}
+rf_result <- RMSE(predict_rf, Y_test)
+```
+
+The RMSE value from the training and test models are relatively similar with a 0.003 difference in favor of the testing set. With such close results the model is consistent with little overfitting. 
+
+Choosing from the models, random forests produces the better model for 
+regression given the data. 
+
+## Modified Random Forest
+```{r}
+varImp(fitted_rf)
+```
+
+The random forest model does the best when the number of variables are the same across the models. Taking into account the variables that the random forest found to be important, we can reduce the number of variables to attempt to get a lower complexity model.
+
+```{r, echo=TRUE, eval=TRUE}
+training <- training %>%
+  select(Price, Southern.Metropolitan, u, BuildingAge, BuildingArea, Distance, Rooms, h, Bathroom, Landsize, Eastern.Metropolitan)
+testing <- testing %>%
+  select(Price, Southern.Metropolitan, u, BuildingAge, BuildingArea, Distance, Rooms, h, Bathroom, Landsize, Eastern.Metropolitan)
+```
+
+```{r, echo=TRUE, eval=TRUE}
+X_train <- training %>% select(-Price)
+X_test <- testing %>% select(-Price)
+Y_train <- training$Price
+Y_test <- testing$Price
+```
+
+```{r, echo=TRUE, eval=FALSE}
+rf_ctrl <- trainControl(method = "cv", number = 5)
+fitted_mod_rf <- train(Price~., data = training,
+                       trControl = rf_ctrl,
+                       tuneLength = 10,
+                       method = "ranger",
+                       importance = "permutation",
+                       metric = "RMSE",
+                       verbose = TRUE)
+```
+
+```{r, echo=FALSE, eval=TRUE}
+#saveRDS(fitted_mod_rf, "fitted_mod_rf.rds")
+fitted_mod_rf <- readRDS("fitted_mod_rf.rds")
+```
+
+```{r, echo=TRUE, eval=TRUE}
+fitted_mod_rf
+```
+
+After cross-validation, the optimal model was mtry = 5, splitrule = variance and min.node.size = 5 with a RMSE of 0.219. This result is slightly worse than the original random forest model.
+
+```{r}
+print(fitted_mod_rf$finalModel)
+```
+
+```{r}
+plot(varImp(fitted_mod_rf))
+```
+
+Interestingly enough, the model found Eastern Metropolitan to be not important.
+
+```{r, echo=TRUE, eval=TRUE}
+predict_mod_rf <- predict(fitted_mod_rf, X_test)
+RMSE(predict_mod_rf, Y_test)
+```
+
+```{r, echo=FALSE, eval=TRUE}
+mod_rf_result <- RMSE(predict_mod_rf, Y_test)
+```
+
+Using the testing data, the model obtained a RMSE of 0.221, which does slightly worse than the original model with the benefit of lower complexity.
+
+# Final Model
+
+```{r, echo=TRUE, eval=TRUE}
+results <- matrix(c(lm_result, dt_result, rf_result, mod_rf_result),ncol=4, byrow=TRUE)
+colnames(results) <- c("LR", "DT", "RF", "Modified RF")
+rownames(results) <- c("RMSE")
+results <- as.table(results)
+results
+```
+
+Taking a look at RMSE for all models, the best performing model is the modified random forest model. The difference between the original and modified random forest model is the number of variables used. By reducing dimensionality in the data, we get a model just as effective.
+
+Interestingly, the linear regression model performed better than the decision tree model. Both being simpler models, linear regression is widely known and studied and much easier to interpret than the decision tree. 
+
+# Conclusion
+
+In general, we found that home prices increased with all variables. The only difference is the influence of each variable.
+
+Variables that impacted housing prices the most were:
+
+* Homes located in Southern Metropolitan region
+* Age of the home
+* Building area
+* Distance from city center
+
+Using this information, an individual can price their home based off these variables. 
