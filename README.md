@@ -4,6 +4,6 @@ This project uses housing data from Domain.com.au posted on Kaggle, the project 
 
 # Files and Folders
 
-* The melbourne-housing-market.html is the final output for the project, it can be viewed here...
+* The melbourne-housing-market.html is the final output for the project, [it can be viewed here...](https://justingee193.github.io/justingee193.github.io/links/melbourne-housing-market.html)
 * The melbourne-housing-market.rmd file is where the code and output is written
 * The Melbourne_housing_FULL.csv file contains the data used for the project
