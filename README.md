@@ -9,4 +9,4 @@ melbourne-housing-market.rmd - Contains code and output, written in Rmarkdown
 Melbourne_housing_FULL.csv - Data used for project
 ```
 
-Final output can be viewed [here...](https://justingee193.github.io/justingee193.github.io/links/melbourne-housing-market.html)
+Final output can be viewed [here...](https://justingee193.github.io/links/melbourne-housing-market.html)
